@@ -14,6 +14,14 @@ warn_() { echo -e "  ${YELLOW}⚠${NC} $1"; }
 fail()  { echo -e "  ${RED}✗${NC} $1"; }
 prompt(){ printf "  ${BOLD}%s${NC}" "$1"; }
 
+# Helper: find opencode in common locations
+find_opencode() {
+    command -v opencode 2>/dev/null && return 0
+    [ -x "$HOME/.opencode/bin/opencode" ] && echo "$HOME/.opencode/bin/opencode" && return 0
+    [ -x "/usr/local/bin/opencode" ] && echo "/usr/local/bin/opencode" && return 0
+    return 1
+}
+
 echo ""
 echo -e "${BOLD}  db-assistant-agent — One-Command Setup${NC}"
 echo -e "  OpenCode + GaussDB (read-only) via MCP"
@@ -23,16 +31,38 @@ echo ""
 # ── Step 1: OpenCode ──
 info "Step 1/6: OpenCode"
 
-if command -v opencode &>/dev/null; then
-    ok "already installed ($(opencode --version 2>&1 || echo 'unknown'))"
+if OC_PATH="$(find_opencode 2>/dev/null)"; then
+    ok "already installed ($("$OC_PATH" --version 2>&1 || echo 'unknown'))"
+    # Ensure it's on PATH for the alias
+    case ":$PATH:" in
+        *":$(dirname "$OC_PATH"):"*) ;;
+        *) export PATH="$(dirname "$OC_PATH"):$PATH" ;;
+    esac
 else
     warn_ "not found — installing..."
-    curl -fsSL https://opencode.ai/install | bash
-    export PATH="$HOME/.local/bin:$PATH"
-    if command -v opencode &>/dev/null; then
-        ok "installed"
+    # Try official installer
+    if curl -fsSL https://opencode.ai/install | bash 2>&1; then
+        ok "install script completed"
     else
-        fail "installation failed. Run manually: curl -fsSL https://opencode.ai/install | bash"
+        warn_ "official installer failed — trying npm..."
+        if npm install -g opencode-ai 2>&1; then
+            ok "installed via npm"
+        else
+            fail "could not install opencode automatically."
+            echo ""
+            echo "  Please install manually with one of:"
+            echo "    curl -fsSL https://opencode.ai/install | bash"
+            echo "    npm install -g opencode-ai"
+            echo ""
+            exit 1
+        fi
+    fi
+    # Re-check after install (check all locations)
+    export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
+    if OC_PATH="$(find_opencode 2>/dev/null)"; then
+        ok "found at: $OC_PATH"
+    else
+        fail "installed but not found in PATH. Please restart your shell and re-run."
         exit 1
     fi
 fi
@@ -44,13 +74,17 @@ if command -v uv &>/dev/null; then
     ok "already installed"
 else
     warn_ "not found — installing..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.local/bin:$PATH"
-    if command -v uv &>/dev/null; then
-        ok "installed"
+    if curl -LsSf https://astral.sh/uv/install.sh | sh 2>&1; then
+        export PATH="$HOME/.local/bin:$PATH"
+        if command -v uv &>/dev/null; then
+            ok "installed"
+        else
+            warn_ "installed but not in PATH — continuing (may need shell restart)"
+        fi
     else
-        fail "installation failed. Run manually: curl -LsSf https://astral.sh/uv/install.sh | sh"
-        exit 1
+        warn_ "uv installation failed — you can install later:"
+        warn_ "  curl -LsSf https://astral.sh/uv/install.sh | sh"
+        warn_ "continuing anyway..."
     fi
 fi
 
@@ -66,19 +100,59 @@ if [ -z "$MAAS_API_KEY" ]; then
 fi
 ok "API key set"
 
-# ── Step 4: MCP server path ──
+# ── Step 4: MCP server ──
 info "Step 4/6: MCP server (mcp-opengauss)"
 
-prompt "Path to mcp-opengauss [~/mcp-servers/mcp-opengauss]: "
-read -r MCP_OPENGAUSS_DIR
-MCP_OPENGAUSS_DIR="${MCP_OPENGAUSS_DIR:-$HOME/mcp-servers/mcp-opengauss}"
+MCP_OPENGAUSS_DIR="$HOME/mcp-servers/mcp-opengauss"
 
 if [ -d "$MCP_OPENGAUSS_DIR" ]; then
     ok "found: $MCP_OPENGAUSS_DIR"
 else
-    warn_ "directory not found: $MCP_OPENGAUSS_DIR"
-    warn_ "install mcp-opengauss there before using the agent."
-    warn_ "you can update the path in .env later."
+    echo ""
+    echo "  mcp-opengauss not found at $MCP_OPENGAUSS_DIR"
+    echo ""
+    echo "  Options:"
+    echo "    1) Clone official mcp-opengauss from GitCode (recommended)"
+    echo "    2) Clone from GitHub mirror (vincentsunx/mcp-openGauss)"
+    echo "    3) Skip — I'll install it later"
+    echo ""
+    prompt "Choice [1-3] (default 1): "
+    read -r MCP_CHOICE
+    MCP_CHOICE="${MCP_CHOICE:-1}"
+
+    case "$MCP_CHOICE" in
+        1)
+            info "Cloning official mcp-opengauss from GitCode"
+            mkdir -p "$HOME/mcp-servers"
+            if git clone https://gitcode.com/opengauss/mcp-opengauss.git "$MCP_OPENGAUSS_DIR" 2>&1; then
+                ok "cloned to $MCP_OPENGAUSS_DIR"
+            else
+                warn_ "GitCode clone failed — trying GitHub mirror..."
+                if git clone https://github.com/vincentsunx/mcp-openGauss.git "$MCP_OPENGAUSS_DIR" 2>&1; then
+                    ok "cloned from GitHub mirror to $MCP_OPENGAUSS_DIR"
+                else
+                    fail "could not clone mcp-opengauss."
+                    warn_ "install manually later and update MCP_OPENGAUSS_DIR in .env"
+                fi
+            fi
+            ;;
+        2)
+            info "Cloning mcp-openGauss from GitHub"
+            mkdir -p "$HOME/mcp-servers"
+            if git clone https://github.com/vincentsunx/mcp-openGauss.git "$MCP_OPENGAUSS_DIR" 2>&1; then
+                ok "cloned to $MCP_OPENGAUSS_DIR"
+            else
+                fail "clone failed — install manually later and update .env"
+            fi
+            ;;
+        3)
+            warn_ "skipped — the agent won't connect to GaussDB until you install mcp-opengauss"
+            warn_ "after installing, update MCP_OPENGAUSS_DIR in .env"
+            ;;
+        *)
+            warn_ "invalid choice — skipping (install mcp-opengauss later)"
+            ;;
+    esac
 fi
 
 # ── Step 5: GaussDB connection ──
