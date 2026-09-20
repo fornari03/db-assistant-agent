@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Colors ──
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TARGET_DIR="$HOME/.config-db-assistant"
+
+info()  { echo -e "\n${BLUE}=== $1 ===${NC}"; }
+ok()    { echo -e "  ${GREEN}✓${NC} $1"; }
+warn_() { echo -e "  ${YELLOW}⚠${NC} $1"; }
+fail()  { echo -e "  ${RED}✗${NC} $1"; }
+prompt(){ printf "  ${BOLD}%s${NC}" "$1"; }
+
+echo ""
+echo -e "${BOLD}  db-assistant-agent — One-Command Setup${NC}"
+echo -e "  OpenCode + GaussDB (read-only) via MCP"
+echo -e "  Model: Huawei Cloud MaaS (glm-5.2)"
+echo ""
+
+# ── Step 1: OpenCode ──
+info "Step 1/6: OpenCode"
+
+if command -v opencode &>/dev/null; then
+    ok "already installed ($(opencode --version 2>&1 || echo 'unknown'))"
+else
+    warn_ "not found — installing..."
+    curl -fsSL https://opencode.ai/install | bash
+    export PATH="$HOME/.local/bin:$PATH"
+    if command -v opencode &>/dev/null; then
+        ok "installed"
+    else
+        fail "installation failed. Run manually: curl -fsSL https://opencode.ai/install | bash"
+        exit 1
+    fi
+fi
+
+# ── Step 2: uv (MCP runtime) ──
+info "Step 2/6: uv (MCP runtime)"
+
+if command -v uv &>/dev/null; then
+    ok "already installed"
+else
+    warn_ "not found — installing..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+    if command -v uv &>/dev/null; then
+        ok "installed"
+    else
+        fail "installation failed. Run manually: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        exit 1
+    fi
+fi
+
+# ── Step 3: MaaS API key ──
+info "Step 3/6: Huawei Cloud MaaS API key"
+
+prompt "Enter your MaaS API key (hidden): "
+read -s MAAS_API_KEY
+echo ""
+if [ -z "$MAAS_API_KEY" ]; then
+    fail "MaaS API key is required."
+    exit 1
+fi
+ok "API key set"
+
+# ── Step 4: MCP server path ──
+info "Step 4/6: MCP server (mcp-opengauss)"
+
+prompt "Path to mcp-opengauss [~/mcp-servers/mcp-opengauss]: "
+read -r MCP_OPENGAUSS_DIR
+MCP_OPENGAUSS_DIR="${MCP_OPENGAUSS_DIR:-$HOME/mcp-servers/mcp-opengauss}"
+
+if [ -d "$MCP_OPENGAUSS_DIR" ]; then
+    ok "found: $MCP_OPENGAUSS_DIR"
+else
+    warn_ "directory not found: $MCP_OPENGAUSS_DIR"
+    warn_ "install mcp-opengauss there before using the agent."
+    warn_ "you can update the path in .env later."
+fi
+
+# ── Step 5: GaussDB connection ──
+info "Step 5/6: GaussDB connection (read-only user)"
+
+prompt "Host [localhost]: "
+read -r GAUSSDB_HOST
+GAUSSDB_HOST="${GAUSSDB_HOST:-localhost}"
+
+prompt "Port [8000]: "
+read -r GAUSSDB_PORT
+GAUSSDB_PORT="${GAUSSDB_PORT:-8000}"
+
+prompt "Database name: "
+read -r GAUSSDB_DBNAME
+if [ -z "$GAUSSDB_DBNAME" ]; then
+    fail "Database name is required."
+    exit 1
+fi
+
+prompt "Read-only username [ai_agent_ro]: "
+read -r GAUSSDB_USER
+GAUSSDB_USER="${GAUSSDB_USER:-ai_agent_ro}"
+
+prompt "Read-only user password (hidden): "
+read -s GAUSSDB_PASSWORD
+echo ""
+if [ -z "$GAUSSDB_PASSWORD" ]; then
+    fail "Password is required."
+    exit 1
+fi
+ok "connection configured"
+
+# ── Optional: Create DB user ──
+echo ""
+prompt "Create the read-only DB user now? Requires admin credentials (y/N): "
+read -r CREATE_USER
+if [[ "$CREATE_USER" =~ ^[Yy]$ ]]; then
+    info "Creating read-only user"
+    echo -e "  ${YELLOW}Admin credentials stay in this script only — never stored.${NC}"
+
+    prompt "Admin username: "
+    read -r ADMIN_USER
+    prompt "Admin password (hidden): "
+    read -s ADMIN_PASSWORD
+    echo ""
+    prompt "Schema name [public]: "
+    read -r SCHEMA_NAME
+    SCHEMA_NAME="${SCHEMA_NAME:-public}"
+
+    SQL=$(cat <<SQLEOF
+CREATE USER ${GAUSSDB_USER} PASSWORD '${GAUSSDB_PASSWORD}';
+GRANT CONNECT ON DATABASE ${GAUSSDB_DBNAME} TO ${GAUSSDB_USER};
+GRANT USAGE ON SCHEMA ${SCHEMA_NAME} TO ${GAUSSDB_USER};
+GRANT SELECT ON ALL TABLES IN SCHEMA ${SCHEMA_NAME} TO ${GAUSSDB_USER};
+ALTER DEFAULT PRIVILEGES IN SCHEMA ${SCHEMA_NAME} GRANT SELECT ON TABLES TO ${GAUSSDB_USER};
+SQLEOF
+)
+
+    if command -v gsql &>/dev/null; then
+        PGPASSWORD="$ADMIN_PASSWORD" gsql -h "$GAUSSDB_HOST" -p "$GAUSSDB_PORT" -U "$ADMIN_USER" -d "$GAUSSDB_DBNAME" -c "$SQL"
+        ok "user created via gsql"
+    elif command -v psql &>/dev/null; then
+        PGPASSWORD="$ADMIN_PASSWORD" psql -h "$GAUSSDB_HOST" -p "$GAUSSDB_PORT" -U "$ADMIN_USER" -d "$GAUSSDB_DBNAME" -c "$SQL"
+        ok "user created via psql"
+    else
+        warn_ "neither gsql nor psql found — SQL saved to create-user-now.sql"
+        echo "$SQL" > "$REPO_DIR/create-user-now.sql"
+        echo ""
+        cat "$REPO_DIR/create-user-now.sql"
+        echo ""
+        warn_ "run the SQL above manually with admin credentials."
+    fi
+
+    # Clear admin credentials immediately
+    ADMIN_USER=""
+    ADMIN_PASSWORD=""
+fi
+
+# ── Step 6: Write .env + install ──
+info "Step 6/6: Installation"
+
+cat > "$REPO_DIR/.env" <<EOF
+# Generated by setup.sh — DO NOT COMMIT
+# Huawei Cloud MaaS
+MAAS_API_KEY=${MAAS_API_KEY}
+
+# MCP server
+MCP_OPENGAUSS_DIR=${MCP_OPENGAUSS_DIR}
+
+# GaussDB (read-only user)
+GAUSSDB_HOST=${GAUSSDB_HOST}
+GAUSSDB_PORT=${GAUSSDB_PORT}
+GAUSSDB_USER=${GAUSSDB_USER}
+GAUSSDB_PASSWORD=${GAUSSDB_PASSWORD}
+GAUSSDB_DBNAME=${GAUSSDB_DBNAME}
+EOF
+ok ".env written"
+
+# Symlink for XDG_CONFIG_HOME isolation
+mkdir -p "$TARGET_DIR"
+rm -rf "$TARGET_DIR/opencode"
+ln -s "$REPO_DIR/opencode" "$TARGET_DIR/opencode"
+ok "symlink: $TARGET_DIR/opencode -> $REPO_DIR/opencode"
+
+# Shell alias
+SHELL_RC="$HOME/.zshrc"
+[ "$(basename "${SHELL:-}")" = "bash" ] && SHELL_RC="$HOME/.bashrc"
+
+ALIAS_LINE="alias db-assistant-agent='set -a; source \"$REPO_DIR/.env\"; set +a; XDG_CONFIG_HOME=\"$TARGET_DIR\" opencode'"
+
+if ! grep -qF "db-assistant-agent" "$SHELL_RC" 2>/dev/null; then
+    echo "$ALIAS_LINE" >> "$SHELL_RC"
+    ok "alias added to $SHELL_RC"
+else
+    ok "alias already exists in $SHELL_RC"
+fi
+
+# Clear sensitive variables
+MAAS_API_KEY=""; GAUSSDB_PASSWORD=""
+
+# ── Done ──
+echo ""
+echo -e "${GREEN}${BOLD}  Setup complete!${NC}"
+echo ""
+echo "  Next steps:"
+echo "    source $SHELL_RC"
+echo "    db-assistant-agent"
+echo ""
+echo "  This opens OpenCode with ONLY the db-assistant-agent (isolated)."
+echo "  Your regular 'opencode' command is unchanged."
+echo ""

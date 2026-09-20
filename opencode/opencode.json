@@ -1,9 +1,25 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "maas": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Huawei Cloud MaaS",
+      "options": {
+        "baseURL": "https://api-ap-southeast-1.modelarts-maas.com/openai/v1",
+        "apiKey": "{env:MAAS_API_KEY}"
+      },
+      "models": {
+        "glm-5.2": {
+          "name": "glm-5.2"
+        }
+      }
+    }
+  },
+  "model": "maas/glm-5.2",
   "mcp": {
     "gaussdb": {
       "type": "local",
-      "command": ["uv", "--directory", "/caminho/para/mcp-opengauss", "run", "server.py"],
+      "command": ["uv", "--directory", "{env:MCP_OPENGAUSS_DIR}", "run", "server.py"],
       "enabled": true,
       "environment": {
         "OPENGAUSS_HOST": "{env:GAUSSDB_HOST}",

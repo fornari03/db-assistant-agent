@@ -1,7 +1,7 @@
 ---
 description: DBA assistant for GaussDB (centralized and distributed) — read-only diagnostics, no modifications
 mode: primary
-model: anthropic/claude-sonnet-4-20250514
+model: maas/glm-5.2
 tools:
   write: false
   edit: false
